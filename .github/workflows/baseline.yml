@@ -13,7 +13,7 @@ concurrency:
 jobs:
   baseline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       FLOCK_SOURCE_SHA: 1b55c6ee2c9cae3c807489293199760e5e21d52b
       FLOCK_REQUIRE_SANDBOX: '1'
