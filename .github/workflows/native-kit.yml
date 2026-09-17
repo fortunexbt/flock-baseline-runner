@@ -1,0 +1,39 @@
+name: Flock public native development kit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Fetch pinned public sources and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/flock-kit"
+          mkdir -p "$root/source" "$root/cargo" "$root/tools"
+          git clone --no-checkout https://github.com/Layr-Labs/flock-challenge-multi.git "$RUNNER_TEMP/source-repo"
+          git -C "$RUNNER_TEMP/source-repo" checkout --detach 1b55c6ee2c9cae3c807489293199760e5e21d52b
+          git -C "$RUNNER_TEMP/source-repo" archive HEAD | tar -x -C "$root/source"
+          echo 1b55c6ee2c9cae3c807489293199760e5e21d52b > "$root/SOURCE_SHA"
+          rustup toolchain install 1.97.0 --profile minimal
+          CARGO_HOME="$root/cargo" cargo +1.97.0 fetch --locked --manifest-path "$root/source/Cargo.toml"
+          toolchain="$(rustc +1.97.0 --print sysroot)"
+          mkdir -p "$root/rust"
+          cp -a "$toolchain/bin" "$toolchain/lib" "$root/rust/"
+          # The kit contains only public crates, a public source archive,
+          # and the pinned Rust distribution. No user config or credentials.
+          find "$root/cargo" -maxdepth 1 -type f -print
+          tar -I 'zstd -3 -T2' -cf "$RUNNER_TEMP/flock-public-kit.tar.zst" -C "$root" .
+          sha256sum "$RUNNER_TEMP/flock-public-kit.tar.zst"
+          du -h "$RUNNER_TEMP/flock-public-kit.tar.zst"
+      - name: Retain public kit for this experiment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: flock-public-native-kit
+          path: ${{ runner.temp }}/flock-public-kit.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
