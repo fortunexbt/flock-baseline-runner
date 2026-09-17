@@ -1,0 +1,91 @@
+name: Flock aligned recycling A-B-B-A
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: flock-recycle-experiment
+  cancel-in-progress: false
+jobs:
+  experiment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FLOCK_SOURCE_SHA: 1b55c6ee2c9cae3c807489293199760e5e21d52b
+      EXPERIMENT_SHA: 176ac0316735bc49fd06ee3507de6da9cddf695d
+      FLOCK_REQUIRE_SANDBOX: '1'
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: '-C target-cpu=native'
+      CC: /usr/bin/cc
+    steps:
+      - name: Set up native sandbox and two pinned trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu
+          free -h
+          if ! command -v bwrap >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y bubblewrap
+          fi
+          if ! bwrap --ro-bind / / --unshare-pid --unshare-net --die-with-parent /bin/true; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+              'profile flock-bwrap /usr/bin/bwrap flags=(unconfined) {' \
+              '  userns,' '}' | sudo tee /etc/apparmor.d/flock-bwrap
+            sudo apparmor_parser -r /etc/apparmor.d/flock-bwrap
+          fi
+          bwrap --ro-bind / / --unshare-pid --unshare-net --die-with-parent /bin/true
+          git clone --no-checkout https://github.com/Layr-Labs/flock-challenge-multi.git "$RUNNER_TEMP/base"
+          git -C "$RUNNER_TEMP/base" checkout --detach "$FLOCK_SOURCE_SHA"
+          git clone --no-hardlinks "$RUNNER_TEMP/base" "$RUNNER_TEMP/candidate"
+          git -C "$RUNNER_TEMP/candidate" checkout --detach "$FLOCK_SOURCE_SHA"
+          curl -fsSL "https://raw.githubusercontent.com/fortunexbt/flock-baseline-runner/$EXPERIMENT_SHA/experiments/recycle-alignment.py" -o "$RUNNER_TEMP/apply.py"
+          python3 "$RUNNER_TEMP/apply.py" "$RUNNER_TEMP/candidate"
+          test "$(git -C "$RUNNER_TEMP/candidate" diff --name-only)" = crates/flock-prover/src/recycle_alloc.rs
+          git -C "$RUNNER_TEMP/candidate" diff --stat
+          git -C "$RUNNER_TEMP/base" diff --exit-code
+          (cd "$RUNNER_TEMP/base" && ./setup.sh)
+          (cd "$RUNNER_TEMP/candidate" && ./setup.sh)
+      - name: Check allocator contracts in normal and raw-System modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/candidate"
+          cargo +1.97.0 test --locked --offline --profile challenge -p flock-prover --lib recycle_alloc::tests -- --test-threads=1
+          FLOCK_NO_ALIGN64=1 cargo +1.97.0 test --locked --offline --profile challenge -p flock-prover --lib mixed_alignment -- --test-threads=1
+      - name: Run independent verified comparisons in A-B-B-A order
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          round=0
+          for arm in base candidate candidate base; do
+            round=$((round+1))
+            cd "$RUNNER_TEMP/$arm"
+            BLAKE3_LOG2=18 BLAKE3_THREADS=auto BLAKE3_WARMUP_RUNS=1 BLAKE3_RUNS=3 ./benchmark.sh
+            cp score.json "$RUNNER_TEMP/results/$round-$arm.json"
+            echo "COMPARISON_ROUND=$round ARM=$arm"
+            cat score.json
+          done
+          python3 - <<'PY'
+          import os,json,pathlib,statistics,math
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'results'
+          arms={'base':[],'candidate':[]}
+          results=[]
+          for p in sorted(root.glob('*.json')):
+              data=json.loads(p.read_text()); m=data['metrics']
+              assert m['verified'] is True and m['batch_size']==262144
+              assert m['measured_runs']==3 and m['warmup_runs']==1
+              assert len(m['trial_seconds'])==3 and len(m['warmup_trial_seconds'])==1
+              assert 0<m['proof_bytes']<=500000
+              assert math.isclose(data['score'],262144/statistics.median(m['trial_seconds']),rel_tol=1e-10)
+              arm=p.stem.split('-',1)[1]
+              arms[arm].extend(m['trial_seconds'])
+              results.append({'arm':arm,'file':p.name,**data})
+          baseline=statistics.median(arms['base']); candidate=statistics.median(arms['candidate'])
+          result={'scope':'same-VM diagnostic A-B-B-A; not an official ranked score','base_median_seconds':baseline,'candidate_median_seconds':candidate,'speedup':baseline/candidate,'latency_change_percent':100*(candidate/baseline-1),'rounds':results}
+          print('EXPERIMENT_JSON_BEGIN');print(json.dumps(result,indent=2));print('EXPERIMENT_JSON_END')
+          PY
+          git -C "$RUNNER_TEMP/base" diff --exit-code
+          test "$(git -C "$RUNNER_TEMP/candidate" diff --name-only)" = crates/flock-prover/src/recycle_alloc.rs
+          printf 'EXPERIMENT_SOURCE_SHA=%s\n' "$FLOCK_SOURCE_SHA"
