@@ -1,0 +1,133 @@
+name: Flock unchanged native baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flock-unchanged-baseline
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FLOCK_SOURCE_SHA: 1b55c6ee2c9cae3c807489293199760e5e21d52b
+      FLOCK_REQUIRE_SANDBOX: '1'
+      BLAKE3_LOG2: '18'
+      BLAKE3_THREADS: auto
+      BLAKE3_WARMUP_RUNS: '20'
+      BLAKE3_RUNS: '100'
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Inspect native host and sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -sm)" = 'Linux x86_64'
+          uname -a
+          lscpu
+          free -h
+          ldd --version | head -n 1
+          if ! command -v bwrap >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y bubblewrap
+          fi
+          bwrap --ro-bind / / --unshare-pid --unshare-net --die-with-parent /bin/true
+
+      - name: Install Yukon and read its agent skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://api.yukon.org/yukon/install.sh | YUKON_INSTALL_SKILL=0 sh
+          export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          yukon config --telemetry disabled
+          yukon trace off
+          mkdir -p "$HOME/.claude"
+          yukon install-skill --target claude
+          yukon version
+          cat "$HOME/.claude/skills/yukon-cli/SKILL.md"
+
+      - name: Restore the exact public benchmark checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/Layr-Labs/flock-challenge-multi.git "$RUNNER_TEMP/flock-challenge-multi"
+          cd "$RUNNER_TEMP/flock-challenge-multi"
+          git checkout --detach "$FLOCK_SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$FLOCK_SOURCE_SHA"
+          # Only public linkage metadata is copied from the original Yukon clone.
+          # Setup and run need no API key. No source files are changed.
+          git config --local yukon.challenge '{"id":"fc968480-5224-4183-a46b-3818e86ed515","name":"eigenlabs/flock-challenge-multi","sourceUrl":"https://github.com/Layr-Labs/flock-challenge-multi","tracks":[{"name":"x86","benchmarkId":"8abde9cf-9256-4453-99e2-9de8632a7943","benchmarkName":"eigenlabs/flock-challenge-multi/x86"}]}'
+          git config --local yukon.benchmark-id 8abde9cf-9256-4453-99e2-9de8632a7943
+          cat "$HOME/.claude/skills/yukon-cli/SKILL.md"
+          cat benchmark.json
+          cat docs/BLAKE3_X86_BENCHMARK.md
+          yukon tracks
+          yukon trace status
+          git diff --exit-code
+          git diff --cached --exit-code
+
+      - name: Set up the unchanged candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/flock-challenge-multi"
+          yukon setup --track x86
+
+      - name: Verify a small sandboxed smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/flock-challenge-multi"
+          BLAKE3_LOG2=8 BLAKE3_THREADS=1 BLAKE3_WARMUP_RUNS=0 BLAKE3_RUNS=1 yukon run --track x86
+          mv score.json "$RUNNER_TEMP/flock-smoke-score.json"
+
+      - name: Run the full unchanged baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/flock-challenge-multi"
+          yukon run --track x86
+          python3 - <<'PY'
+          import json, math, statistics
+          with open('score.json', encoding='utf-8') as f:
+              data = json.load(f)
+          m = data['metrics']
+          assert m['verified'] is True
+          assert m['batch_size'] == 262144
+          assert m['warmup_runs'] == 20 and m['measured_runs'] == 100
+          assert len(m['warmup_trial_seconds']) == 20 and len(m['trial_seconds']) == 100
+          assert all(math.isfinite(t) and t > 0 for t in m['trial_seconds'])
+          assert 0 < m['proof_bytes'] <= 500000
+          median = statistics.median(m['trial_seconds'])
+          assert math.isclose(data['score'], 262144 / median, rel_tol=1e-10)
+          print('BASELINE_SCORE_JSON_BEGIN')
+          print(json.dumps(data, indent=2, sort_keys=True))
+          print('BASELINE_SCORE_JSON_END')
+          PY
+          git diff --exit-code
+          git diff --cached --exit-code
+          test "$(git rev-parse HEAD)" = "$FLOCK_SOURCE_SHA"
+          printf 'BASELINE_SOURCE_SHA=%s\n' "$(git rev-parse HEAD)"
+          cat benchmark-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          printf '\nDiagnostic result from a standard GitHub-hosted runner; not an official Yukon ranked score. No optimization or submission was made.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record final source state
+        if: always()
+        shell: bash
+        run: |
+          if test -d "$RUNNER_TEMP/flock-challenge-multi/.git"; then
+            cd "$RUNNER_TEMP/flock-challenge-multi"
+            git rev-parse HEAD
+            git status --short
+            git diff --stat
+            if test -f score.json; then cat score.json; fi
+          fi
+          # All evidence is retained in workflow logs. No artifacts, caches,
+          # secrets, paid runner sizes, or external cloud machines are used.
