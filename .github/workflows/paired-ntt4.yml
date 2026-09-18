@@ -1,0 +1,111 @@
+name: Flock paired NTT full-size A-B-B-A
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: flock-paired-ntt4
+  cancel-in-progress: false
+jobs:
+  experiment:
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FLOCK_SOURCE_SHA: 1b55c6ee2c9cae3c807489293199760e5e21d52b
+      EXPERIMENT_SHA: 0385d765435d4fa50ce8e36492cddc0032c5b5f6
+      FLOCK_REQUIRE_SANDBOX: '1'
+      RUSTFLAGS: '-C target-cpu=native'
+      CARGO_TERM_COLOR: never
+      CC: /usr/bin/cc
+    steps:
+      - name: Check CPU features and sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu
+          free -h
+          grep -qw avx512f /proc/cpuinfo
+          grep -qw vpclmulqdq /proc/cpuinfo
+          if ! command -v bwrap >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y bubblewrap
+          fi
+          if ! bwrap --ro-bind / / --unshare-pid --unshare-net --die-with-parent /bin/true; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+              'profile flock-bwrap /usr/bin/bwrap flags=(unconfined) {' \
+              '  userns,' '}' | sudo tee /etc/apparmor.d/flock-bwrap
+            sudo apparmor_parser -r /etc/apparmor.d/flock-bwrap
+          fi
+          bwrap --ro-bind / / --unshare-pid --unshare-net --die-with-parent /bin/true
+      - name: Build separate pristine and candidate trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/Layr-Labs/flock-challenge-multi.git "$RUNNER_TEMP/base"
+          git -C "$RUNNER_TEMP/base" checkout --detach "$FLOCK_SOURCE_SHA"
+          git clone --no-hardlinks "$RUNNER_TEMP/base" "$RUNNER_TEMP/candidate"
+          git -C "$RUNNER_TEMP/candidate" checkout --detach "$FLOCK_SOURCE_SHA"
+          curl -fsSL "https://raw.githubusercontent.com/fortunexbt/flock-baseline-runner/$EXPERIMENT_SHA/experiments/paired-ntt4.patch" -o "$RUNNER_TEMP/change.patch"
+          git -C "$RUNNER_TEMP/candidate" apply --check "$RUNNER_TEMP/change.patch"
+          git -C "$RUNNER_TEMP/candidate" apply "$RUNNER_TEMP/change.patch"
+          echo "80d858145a1afa1824cf06e91bbdc598b651d5ebfd7dccb6d1efc05a7ff6eba8  $RUNNER_TEMP/candidate/crates/flock-core/src/ntt/additive_ntt_f128/kernels/x86_64.rs" | sha256sum -c -
+          git -C "$RUNNER_TEMP/candidate" diff
+          (cd "$RUNNER_TEMP/base" && ./setup.sh)
+          (cd "$RUNNER_TEMP/candidate" && ./setup.sh)
+      - name: Run scalar-oracle and transform differential tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/candidate"
+          cargo +1.97.0 test --locked --offline --profile challenge -p flock-core --lib paired_ -- --test-threads=1
+          cargo +1.97.0 test --locked --offline --profile challenge -p flock-core --lib fused4 -- --test-threads=1
+          FLOCK_NO_NTT_MUL_DIET=1 cargo +1.97.0 test --locked --offline --profile challenge -p flock-core --lib paired_ -- --test-threads=1
+      - name: Compare full-size independently verified proofs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          round=0
+          for arm in base candidate candidate base; do
+            round=$((round+1))
+            cd "$RUNNER_TEMP/$arm"
+            BLAKE3_LOG2=18 BLAKE3_THREADS=auto BLAKE3_WARMUP_RUNS=0 BLAKE3_RUNS=3 ./benchmark.sh
+            cp score.json "$RUNNER_TEMP/results/$round-$arm.json"
+            echo "COMPARISON_ROUND=$round ARM=$arm"
+            cat score.json
+          done
+          python3 - <<'PY'
+          import os,json,pathlib,statistics,math
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'results'
+          arms={'base':[],'candidate':[]}; results=[]
+          for p in sorted(root.glob('*.json')):
+              d=json.loads(p.read_text());m=d['metrics']
+              assert m['verified'] is True and m['batch_size']==262144
+              assert m['measured_runs']==3 and m['warmup_runs']==0
+              assert len(m['trial_seconds'])==3 and not m['warmup_trial_seconds']
+              assert all(math.isfinite(t) and t>0 for t in m['trial_seconds'])
+              assert 0<m['proof_bytes']<=500000
+              assert math.isclose(d['score'],262144/statistics.median(m['trial_seconds']),rel_tol=1e-10)
+              arm=p.stem.split('-',1)[1];arms[arm].extend(m['trial_seconds'])
+              results.append({'arm':arm,'file':p.name,**d})
+          a=statistics.median(arms['base']);b=statistics.median(arms['candidate'])
+          result={'source_sha':os.environ['FLOCK_SOURCE_SHA'],'scope':'same-VM A-B-B-A full-size diagnostic; zero machine warm-ups, three measured proofs per round; not an official ranked score','base_median_seconds':a,'candidate_median_seconds':b,'speedup':a/b,'latency_change_percent':100*(b/a-1),'rounds':results}
+          print('EXPERIMENT_JSON_BEGIN');print(json.dumps(result,indent=2));print('EXPERIMENT_JSON_END')
+          PY
+          git -C "$RUNNER_TEMP/base" diff --exit-code
+          test "$(git -C "$RUNNER_TEMP/candidate" diff --name-only)" = crates/flock-core/src/ntt/additive_ntt_f128/kernels/x86_64.rs
+          printf 'EXPERIMENT_SOURCE_SHA=%s\n' "$FLOCK_SOURCE_SHA"
+      - name: Retain exact candidate and comparison evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paired-ntt4-${{ matrix.replica }}
+          path: |
+            ${{ runner.temp }}/candidate/crates/flock-core/src/ntt/additive_ntt_f128/kernels/x86_64.rs
+            ${{ runner.temp }}/results/*.json
+          retention-days: 1
+          if-no-files-found: warn
