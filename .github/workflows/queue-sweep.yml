@@ -1,0 +1,77 @@
+name: Flock deep queue comparison
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        host_probe: [1, 2]
+    env:
+      FLOCK_SOURCE_SHA: 1b55c6ee2c9cae3c807489293199760e5e21d52b
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Build unchanged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu
+          grep -qw avx512f /proc/cpuinfo || { echo "CPU lacks the optimized-path features"; exit 78; }
+          grep -qw gfni /proc/cpuinfo || exit 78
+          git clone --no-checkout https://github.com/Layr-Labs/flock-challenge-multi.git "$RUNNER_TEMP/flock-profile"
+          cd "$RUNNER_TEMP/flock-profile"
+          git checkout --detach "$FLOCK_SOURCE_SHA"
+          ./setup.sh
+          git diff --exit-code
+      - name: Observe existing phase instrumentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/flock-profile"
+          python3 - <<'PY'
+          import os, pathlib, subprocess, time, tempfile, hashlib
+          root = pathlib.Path.cwd()
+          worker = root/'target/challenge-candidate/challenge/flock-benchmark-worker'
+          configs = [('base',{}),('depth2',{'FLOCK_NTT_DEEP_SPLIT_DEPTH':'2'}),('depth4',{'FLOCK_NTT_DEEP_SPLIT_DEPTH':'4'}),('depth16',{'FLOCK_NTT_DEEP_SPLIT_DEPTH':'16'}),('depth16',{'FLOCK_NTT_DEEP_SPLIT_DEPTH':'16'}),('depth4',{'FLOCK_NTT_DEEP_SPLIT_DEPTH':'4'}),('depth2',{'FLOCK_NTT_DEEP_SPLIT_DEPTH':'2'}),('base',{})]
+          proof_hash = None
+          for trial,(arm,extra) in enumerate(configs):
+              with tempfile.TemporaryDirectory(prefix='flock-profile-') as tmp:
+                  tmp = pathlib.Path(tmp)
+                  ready, proof, trace = (tmp/n for n in ('ready', 'proof', 'trace'))
+                  env = {'PATH': os.environ['PATH'], 'TMPDIR':str(tmp), 'RAYON_NUM_THREADS':str(os.cpu_count()), 'FLOCK_GAP_TIMING':'1'}
+                  env.update(extra)
+                  with trace.open('w') as err:
+                      p = subprocess.Popen([str(worker),'18',str(ready),str(proof)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err, env=env, start_new_session=True)
+                      try:
+                          deadline = time.monotonic()+290
+                          while not ready.exists():
+                              if p.poll() is not None: raise RuntimeError(trace.read_text())
+                              if time.monotonic()>deadline: raise TimeoutError('readiness')
+                              time.sleep(.02)
+                          begin=time.monotonic()
+                          p.stdin.write(f'{424242}\n'.encode()); p.stdin.flush()
+                          deadline=begin+150
+                          while not proof.exists():
+                              if p.poll() is not None: raise RuntimeError(trace.read_text())
+                              if time.monotonic()>deadline: raise TimeoutError('proof')
+                              time.sleep(.001)
+                          data=proof.read_bytes()
+                          digest = hashlib.sha256(data).hexdigest()
+                          if proof_hash is None: proof_hash=digest
+                          assert digest==proof_hash, 'queue schedule changed proof bytes'
+                          print(f'ARM={arm} PROFILE_TRIAL={trial} wall_seconds={time.monotonic()-begin:.6f} bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}',flush=True)
+                      finally:
+                          import signal
+                          try: os.killpg(p.pid,signal.SIGKILL)
+                          except ProcessLookupError: pass
+                          p.wait()
+                  sections=trace.read_text().split('[gap] ========')
+                  print('[gap] ========'+sections[-1],flush=True)
+          print('PROFILE_SOURCE_SHA='+subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip())
+          PY
+          git diff --exit-code
+          git diff --cached --exit-code
