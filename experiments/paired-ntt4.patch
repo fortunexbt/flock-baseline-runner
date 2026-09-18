@@ -1,6 +1,6 @@
 --- a/crates/flock-core/src/ntt/additive_ntt_f128/kernels/x86_64.rs
 +++ b/crates/flock-core/src/ntt/additive_ntt_f128/kernels/x86_64.rs
-@@ -103,6 +103,75 @@
+@@ -103,6 +103,82 @@
              reduced,
          )
      }
@@ -26,17 +26,24 @@
 +/// Each twiddle pair must contain `(t, t*x^64 mod p)` in all four lanes.
 +#[inline(always)]
 +unsafe fn butterfly_pair_split(
-+    ta: TwX4, tb: TwX4,
-+    mut ua: core::arch::x86_64::__m512i, mut va: core::arch::x86_64::__m512i,
-+    mut ub: core::arch::x86_64::__m512i, mut vb: core::arch::x86_64::__m512i,
-+) -> (core::arch::x86_64::__m512i,core::arch::x86_64::__m512i,
-+      core::arch::x86_64::__m512i,core::arch::x86_64::__m512i) {
++    ta: TwX4,
++    tb: TwX4,
++    mut ua: core::arch::x86_64::__m512i,
++    mut va: core::arch::x86_64::__m512i,
++    mut ub: core::arch::x86_64::__m512i,
++    mut vb: core::arch::x86_64::__m512i,
++) -> (
++    core::arch::x86_64::__m512i,
++    core::arch::x86_64::__m512i,
++    core::arch::x86_64::__m512i,
++    core::arch::x86_64::__m512i,
++) {
 +    use core::arch::x86_64::*;
 +    unsafe {
 +        let poly = _mm512_set1_epi64(0x87);
 +        // Typed scratch outputs are intentional. They give the compiler
 +        // concrete SIMD types as well as explicit early-clobber registers.
-+        let (la,lb,ha,hb,xa,xb):(__m512i,__m512i,__m512i,__m512i,__m512i,__m512i);
++        let (la, lb, ha, hb, xa, xb): (__m512i, __m512i, __m512i, __m512i, __m512i, __m512i);
 +        core::arch::asm!(
 +            "vpclmulqdq {la:z}, {va}, {ta}, 0",
 +            "vpclmulqdq {xa:z}, {va}, {ca}, 1",
@@ -70,44 +77,119 @@
 +            xa=out(zmm_reg) xa,xb=out(zmm_reg) xb,
 +            options(pure,nomem,nostack,preserves_flags)
 +        );
-+        let _ = (la,lb,ha,hb,xa,xb);
++        let _ = (la, lb, ha, hb, xa, xb);
 +    }
-+    (ua,va,ub,vb)
++    (ua, va, ub, vb)
  }
  
  /// Store four F128 lanes. `NT` uses XMM `MOVNTDQ` so a cold codeword publish
-@@ -1725,6 +1794,22 @@
+@@ -1725,31 +1801,81 @@
                  }};
              }
  
+-            pf_quad!(0);
+-            let outer = tw[0];
+-            for i in 0..8 {
+-                butterfly!(i, i + 8, outer);
+-            }
+-            pf_quad!(1);
+-            for s in 0..2 {
+-                let twiddle = tw[1 + s];
 +            if DIET {
 +                macro_rules! pair {
 +                    ($u0:expr,$v0:expr,$u1:expr,$v1:expr,$t0:expr,$t1:expr) => {{
-+                        let (a,b,c,d)=butterfly_pair_split($t0,$t1,values[$u0],values[$v0],values[$u1],values[$v1]);
-+                        values[$u0]=a; values[$v0]=b; values[$u1]=c; values[$v1]=d;
++                        let (a, b, c, d) = butterfly_pair_split(
++                            $t0,
++                            $t1,
++                            values[$u0],
++                            values[$v0],
++                            values[$u1],
++                            values[$v1],
++                        );
++                        values[$u0] = a;
++                        values[$v0] = b;
++                        values[$u1] = c;
++                        values[$v1] = d;
 +                    }};
 +                }
 +                pf_quad!(0);
-+                for i in 0..4 { pair!(2*i,2*i+8,2*i+1,2*i+9,tw[0],tw[0]); }
+                 for i in 0..4 {
+-                    butterfly!(8 * s + i, 8 * s + i + 4, twiddle);
+-                }
+-            }
+-            pf_quad!(2);
+-            for s in 0..4 {
+-                let twiddle = tw[3 + s];
+-                for i in 0..2 {
+-                    butterfly!(4 * s + i, 4 * s + i + 2, twiddle);
+-                }
+-            }
+-            pf_quad!(3);
+-            for s in 0..8 {
+-                let twiddle = tw[7 + s];
+-                butterfly!(2 * s, 2 * s + 1, twiddle);
+-            }
+-
++                    pair!(2 * i, 2 * i + 8, 2 * i + 1, 2 * i + 9, tw[0], tw[0]);
++                }
 +                pf_quad!(1);
-+                for s in 0..2 { for i in 0..2 { pair!(8*s+2*i,8*s+2*i+4,8*s+2*i+1,8*s+2*i+5,tw[1+s],tw[1+s]); }}
++                for s in 0..2 {
++                    for i in 0..2 {
++                        pair!(
++                            8 * s + 2 * i,
++                            8 * s + 2 * i + 4,
++                            8 * s + 2 * i + 1,
++                            8 * s + 2 * i + 5,
++                            tw[1 + s],
++                            tw[1 + s]
++                        );
++                    }
++                }
 +                pf_quad!(2);
-+                for s in 0..4 { pair!(4*s,4*s+2,4*s+1,4*s+3,tw[3+s],tw[3+s]); }
++                for s in 0..4 {
++                    pair!(4 * s, 4 * s + 2, 4 * s + 1, 4 * s + 3, tw[3 + s], tw[3 + s]);
++                }
 +                pf_quad!(3);
-+                for s in 0..4 { pair!(4*s,4*s+1,4*s+2,4*s+3,tw[7+2*s],tw[8+2*s]); }
++                for s in 0..4 {
++                    pair!(
++                        4 * s,
++                        4 * s + 1,
++                        4 * s + 2,
++                        4 * s + 3,
++                        tw[7 + 2 * s],
++                        tw[8 + 2 * s]
++                    );
++                }
 +            } else {
-             pf_quad!(0);
-             let outer = tw[0];
-             for i in 0..8 {
-@@ -1750,6 +1835,7 @@
-                 butterfly!(2 * s, 2 * s + 1, twiddle);
-             }
- 
++                pf_quad!(0);
++                let outer = tw[0];
++                for i in 0..8 {
++                    butterfly!(i, i + 8, outer);
++                }
++                pf_quad!(1);
++                for s in 0..2 {
++                    let twiddle = tw[1 + s];
++                    for i in 0..4 {
++                        butterfly!(8 * s + i, 8 * s + i + 4, twiddle);
++                    }
++                }
++                pf_quad!(2);
++                for s in 0..4 {
++                    let twiddle = tw[3 + s];
++                    for i in 0..2 {
++                        butterfly!(4 * s + i, 4 * s + i + 2, twiddle);
++                    }
++                }
++                pf_quad!(3);
++                for s in 0..8 {
++                    let twiddle = tw[7 + s];
++                    butterfly!(2 * s, 2 * s + 1, twiddle);
++                }
 +            }
              for (i, value) in values.iter().enumerate() {
                  _mm512_storeu_si512(row(i).add(lane) as *mut __m512i, *value);
              }
-@@ -2135,6 +2221,58 @@
+@@ -2135,6 +2261,104 @@
                  st
              };
              F128 { lo: n(), hi: n() }
@@ -120,24 +202,55 @@
 +        use core::arch::x86_64::{__m512i, _mm512_loadu_si512, _mm512_storeu_si512};
 +        let mut next = rng(0x7f41_06e2_5823_91ad);
 +        for case in 0..2048usize {
-+            let ta = if case == 0 { F128::ZERO } else if case == 1 { F128::ONE } else { next() };
-+            let tb = if case == 2 { F128::ZERO } else if case == 3 { F128::ONE } else { next() };
-+            let original: [[F128; 4]; 4] = core::array::from_fn(|_| core::array::from_fn(|_| next()));
++            let ta = if case == 0 {
++                F128::ZERO
++            } else if case == 1 {
++                F128::ONE
++            } else {
++                next()
++            };
++            let tb = if case == 2 {
++                F128::ZERO
++            } else if case == 3 {
++                F128::ONE
++            } else {
++                next()
++            };
++            let original: [[F128; 4]; 4] =
++                core::array::from_fn(|_| core::array::from_fn(|_| next()));
 +            let mut got = [[F128::ZERO; 4]; 4];
 +            // SAFETY: this test is compiled only in the feature-gated x86
 +            // module; each array holds exactly four initialized F128 values.
 +            unsafe {
-+                let args: [__m512i; 4] = core::array::from_fn(|i| _mm512_loadu_si512(original[i].as_ptr().cast()));
-+                let (a,b,c,d) = butterfly_pair_split(tw_x4::<false,true>(ta),tw_x4::<false,true>(tb),args[0],args[1],args[2],args[3]);
-+                for (i,value) in [a,b,c,d].into_iter().enumerate() { _mm512_storeu_si512(got[i].as_mut_ptr().cast(), value); }
++                let args: [__m512i; 4] =
++                    core::array::from_fn(|i| _mm512_loadu_si512(original[i].as_ptr().cast()));
++                let (a, b, c, d) = butterfly_pair_split(
++                    tw_x4::<false, true>(ta),
++                    tw_x4::<false, true>(tb),
++                    args[0],
++                    args[1],
++                    args[2],
++                    args[3],
++                );
++                for (i, value) in [a, b, c, d].into_iter().enumerate() {
++                    _mm512_storeu_si512(got[i].as_mut_ptr().cast(), value);
++                }
 +            }
 +            for lane in 0..4 {
 +                let ua = original[0][lane] + ta * original[1][lane];
 +                let ub = original[2][lane] + tb * original[3][lane];
-+                assert_eq!(got[0][lane],ua,"upper A case={case} lane={lane}");
-+                assert_eq!(got[1][lane],original[1][lane]+ua,"lower A case={case} lane={lane}");
-+                assert_eq!(got[2][lane],ub,"upper B case={case} lane={lane}");
-+                assert_eq!(got[3][lane],original[3][lane]+ub,"lower B case={case} lane={lane}");
++                assert_eq!(got[0][lane], ua, "upper A case={case} lane={lane}");
++                assert_eq!(
++                    got[1][lane],
++                    original[1][lane] + ua,
++                    "lower A case={case} lane={lane}"
++                );
++                assert_eq!(got[2][lane], ub, "upper B case={case} lane={lane}");
++                assert_eq!(
++                    got[3][lane],
++                    original[3][lane] + ub,
++                    "lower B case={case} lane={lane}"
++                );
 +            }
 +        }
 +    }
@@ -145,22 +258,37 @@
 +    #[test]
 +    fn paired_fused4_matches_scalar_at_varied_strides_and_tails() {
 +        let mut next = rng(0x9cd7_f421_66a1_b333);
-+        for stride in [1,2,3,8,128] {
-+            for lanes in [1usize,3,4,7,8,16,60,64,65] {
-+                for active in [0,lanes/2,lanes.saturating_sub(1),lanes] {
-+                    let mut got: Vec<F128> = (0..16*stride*lanes).map(|_| next()).collect();
++        for stride in [1, 2, 3, 8, 128] {
++            for lanes in [1usize, 3, 4, 7, 8, 16, 60, 64, 65] {
++                for active in [0, lanes / 2, lanes.saturating_sub(1), lanes] {
++                    let mut got: Vec<F128> = (0..16 * stride * lanes).map(|_| next()).collect();
 +                    let mut expected = got.clone();
-+                    let tw: [F128;15] = core::array::from_fn(|_|next());
-+                    let row = stride-1;
++                    let tw: [F128; 15] = core::array::from_fn(|_| next());
++                    let row = stride - 1;
 +                    for lane in 0..active {
-+                        let mut values: [F128;16]=core::array::from_fn(|i|expected[(i*stride+row)*lanes+lane]);
-+                        super::super::portable::butterfly_fused_4layer(&mut values,&tw);
-+                        for i in 0..16 {expected[(i*stride+row)*lanes+lane]=values[i];}
++                        let mut values: [F128; 16] =
++                            core::array::from_fn(|i| expected[(i * stride + row) * lanes + lane]);
++                        super::super::portable::butterfly_fused_4layer(&mut values, &tw);
++                        for i in 0..16 {
++                            expected[(i * stride + row) * lanes + lane] = values[i];
++                        }
 +                    }
 +                    // SAFETY: the vector contains all sixteen addressed row
 +                    // groups, the active prefix is bounded, and rows are disjoint.
-+                    unsafe { butterfly_fused_4layer_row(got.as_mut_ptr(),stride,lanes,active,row,&tw); }
-+                    assert_eq!(got,expected,"stride={stride} lanes={lanes} active={active}");
++                    unsafe {
++                        butterfly_fused_4layer_row(
++                            got.as_mut_ptr(),
++                            stride,
++                            lanes,
++                            active,
++                            row,
++                            &tw,
++                        );
++                    }
++                    assert_eq!(
++                        got, expected,
++                        "stride={stride} lanes={lanes} active={active}"
++                    );
 +                }
 +            }
          }
