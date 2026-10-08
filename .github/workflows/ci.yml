@@ -1,0 +1,30 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse workflows
+        run: python3 -c "import sys,yaml;[yaml.safe_load(open(f)) for f in sys.argv[1:]]" .github/workflows/*.yml
+      - name: Compile experiment helpers
+        run: python3 -m py_compile experiments/*.py
+      - name: Apply every experiment to the pinned Flock source
+        run: |
+          set -euo pipefail
+          src=1b55c6ee2c9cae3c807489293199760e5e21d52b
+          git clone --no-checkout https://github.com/Layr-Labs/flock-challenge-multi.git "$RUNNER_TEMP/base"
+          git -C "$RUNNER_TEMP/base" checkout --detach "$src"
+          git -C "$RUNNER_TEMP/base" apply --check "$PWD/experiments/paired-ntt4.patch"
+          for helper in experiments/*.py; do
+            rm -rf "$RUNNER_TEMP/tree"
+            git clone --no-hardlinks "$RUNNER_TEMP/base" "$RUNNER_TEMP/tree"
+            git -C "$RUNNER_TEMP/tree" checkout --detach "$src"
+            python3 "$helper" "$RUNNER_TEMP/tree"
+          done

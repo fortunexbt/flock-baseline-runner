@@ -20,4 +20,22 @@ Execution is manual-only, with one baseline at a time. No paid runner sizes, art
 
 These are diagnostic measurements on GitHub-hosted hardware, **not official Yukon ranked scores**. The official benchmark uses a dedicated 16-vCPU, 32-GB Intel Sapphire Rapids runner. Hosted machines can differ between workflow runs. A future optimization comparison should run both baseline and candidate on the same allocated machine, keep workload and verification identical, and assess variation rather than compare unrelated hosted runs.
 
-No optimization has been made in this repository or in the benchmark checkout.
+No optimization has been made in the benchmark checkout. The experiments below are applied to a separate copy of the pinned source and never submitted.
+
+## Experiments
+
+Each experiment applies one small change to the pinned source with a deterministic helper in `experiments/` (a patch, or a script that refuses a dirty or different checkout). The workflow then runs the unchanged verifier on a pristine tree and the changed tree on the same VM in A-B-B-A order, with a scalar-oracle differential test first.
+
+| Workflow | Change |
+| --- | --- |
+| `outline-ntt3.yml` | Stop inlining the fused three-layer NTT kernel (`notes/outline-ntt3.md`) |
+| `paired-ntt4.yml` | Paired butterflies with bounded register liveness (`experiments/paired-ntt4.patch`) |
+| `field-experiment.yml` | Deferred Karatsuba reduction in GF(2^128) |
+| `recycle-experiment.yml` | Aligned buffer recycling in the prover |
+| `queue-sweep.yml`, `profile*.yml`, `diagnostic.yml`, `native-kit.yml` | Queue depth, worker profiles and development-kit checks |
+
+The experiment workflows need AVX-512 and VPCLMULQDQ, which only some GitHub-hosted machines have. A job that draws a machine without them fails at the first step with a CPU-feature error. Re-run it to draw another machine. Results are in each run's logs and are not official scores.
+
+## CI
+
+`ci.yml` runs on every push and pull request. It parses the workflows, compiles the helpers, and applies every experiment to the pinned upstream commit, so a drifted patch fails fast. The benchmark workflows themselves are manual and are not run by CI.
