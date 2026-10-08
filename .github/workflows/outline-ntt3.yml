@@ -28,8 +28,9 @@ jobs:
           set -euo pipefail
           lscpu
           free -h
-          grep -qw avx512f /proc/cpuinfo
-          grep -qw vpclmulqdq /proc/cpuinfo
+          for flag in avx512f vpclmulqdq; do
+            grep -qw "$flag" /proc/cpuinfo || { echo "::error::Hosted runner CPU lacks $flag; the pool is mixed-hardware, so re-run to draw another machine"; exit 78; }
+          done
           if ! command -v bwrap >/dev/null; then
             sudo apt-get update -qq
             sudo apt-get install -y bubblewrap
