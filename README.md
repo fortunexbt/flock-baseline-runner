@@ -24,13 +24,13 @@ No optimization has been made in the benchmark checkout. The experiments below a
 
 ## Experiments
 
-Each experiment applies one small change to the pinned source with a deterministic helper in `experiments/` (a patch, or a script that refuses a dirty or different checkout). The workflow then runs the unchanged verifier on a pristine tree and the changed tree on the same VM in A-B-B-A order, with a scalar-oracle differential test first.
+Each experiment applies one small change to the pinned source with a deterministic helper in `experiments/` (a patch, or a script that refuses a dirty or different checkout). The workflow then runs the unchanged verifier on a pristine tree and the changed tree on the same VM in A-B-B-A order.
 
 | Workflow | Change |
 | --- | --- |
 | `outline-ntt3.yml` | Stop inlining the fused three-layer NTT kernel (`notes/outline-ntt3.md`) |
 | `paired-ntt4.yml` | Paired butterflies with bounded register liveness (`experiments/paired-ntt4.patch`) |
-| `field-experiment.yml` | Deferred Karatsuba reduction in GF(2^128) |
+| `field-experiment.yml` | Deferred Karatsuba accumulation in GF(2^128) |
 | `recycle-experiment.yml` | Aligned buffer recycling in the prover |
 | `queue-sweep.yml`, `profile*.yml`, `diagnostic.yml`, `native-kit.yml` | Queue depth, worker profiles and development-kit checks |
 
