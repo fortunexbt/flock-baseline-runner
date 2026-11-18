@@ -1,41 +1,36 @@
 # Flock baseline runner
 
-This repository runs the **unchanged** Flock x86 challenge on a standard GitHub-hosted Ubuntu 24.04 x86_64 runner. It does not submit to Yukon or modify the challenge source.
+GitHub Actions workflows that run the public [Flock](https://github.com/Layr-Labs/flock-challenge-multi) BLAKE3 proving challenge, x86 track, on standard hosted Ubuntu 24.04 runners. One workflow measures the unchanged source, and the others test single code changes against it on the same VM in A-B-B-A order.
 
-Source: `Layr-Labs/flock-challenge-multi`, commit `1b55c6ee2c9cae3c807489293199760e5e21d52b`.
+Everything is pinned to upstream commit `1b55c6ee2c9cae3c807489293199760e5e21d52b`. Nothing here is submitted to Yukon, and these results aren't official scores.
 
-## Run
+## Baseline
 
 ```sh
 gh workflow run baseline.yml --repo fortunexbt/flock-baseline-runner
 ```
 
-The workflow installs Yukon and its skill, reads the skill before and after restoring the pinned checkout, and runs `yukon setup --track x86`. It requires bubblewrap, first verifies a small smoke test, then runs the complete baseline: 262,144 compressions per proof, 20 discarded verified warm-up trials, and 100 measured verified trials. The checksum-pinned verifier controls correctness and timing. The workflow independently checks the final score formula, proof-size limit, trial counts, and unchanged source revision.
+`baseline.yml` installs the Yukon CLI with telemetry and tracing off, runs `yukon setup --track x86` on the pinned checkout, passes a small smoke test, then runs the full benchmark. That's 262,144 compressions per proof, 20 verified warm-ups and 100 measured trials, all checked by the upstream verifier inside a bubblewrap sandbox. The workflow then checks the score is 262,144 divided by the median trial time, the proof is at most 500,000 bytes and the source is unchanged, and prints the full score JSON to the log.
 
-No Yukon API key or other repository secret is supplied. Setup and run use only the public linkage metadata from the original Yukon clone. Telemetry and transcript collection are disabled. The Ubuntu namespace compatibility profile applies only to `/usr/bin/bwrap` in the disposable runner; system-wide AppArmor restrictions remain enabled. The protected benchmark scripts and verifier are unchanged.
+It uses no secrets or Yukon API key, only the challenge's public linkage metadata. Where Ubuntu blocks user namespaces, it allows them for `/usr/bin/bwrap` alone and leaves AppArmor's other restrictions on.
 
-Execution is manual-only, with one baseline at a time. No paid runner sizes, artifact uploads, caches, or persistent external machines are configured. Scores and complete trial data are printed in workflow logs.
-
-## Interpretation
-
-These are diagnostic measurements on GitHub-hosted hardware, **not official Yukon ranked scores**. The official benchmark uses a dedicated 16-vCPU, 32-GB Intel Sapphire Rapids runner. Hosted machines can differ between workflow runs. A future optimization comparison should run both baseline and candidate on the same allocated machine, keep workload and verification identical, and assess variation rather than compare unrelated hosted runs.
-
-No optimization has been made in the benchmark checkout. The experiments below are applied to a separate copy of the pinned source and never submitted.
+No full 20+100 run has completed yet. One hit the old one-hour job limit after 93 of 100 trials, and a later one failed proof verification on a different host.
 
 ## Experiments
 
-Each experiment applies one small change to the pinned source with a deterministic helper in `experiments/` (a patch, or a script that refuses a dirty or different checkout). The workflow then runs the unchanged verifier on a pristine tree and the changed tree on the same VM in A-B-B-A order.
+Each experiment applies one change to a second copy of the pinned source, using a helper in `experiments/` fetched at a pinned commit. The helpers refuse a dirty or different checkout. The workflow builds both trees, runs the candidate's unit tests, then times base, candidate, candidate, base with every proof checked by the unchanged verifier.
 
-| Workflow | Change |
-| --- | --- |
-| `outline-ntt3.yml` | Stop inlining the fused three-layer NTT kernel (`notes/outline-ntt3.md`) |
-| `paired-ntt4.yml` | Paired butterflies with bounded register liveness (`experiments/paired-ntt4.patch`) |
-| `field-experiment.yml` | Deferred Karatsuba accumulation in GF(2^128) |
-| `recycle-experiment.yml` | Aligned buffer recycling in the prover |
-| `queue-sweep.yml`, `profile*.yml`, `diagnostic.yml`, `native-kit.yml` | Queue depth, worker profiles and development-kit checks |
+| Workflow | Change | Result |
+| --- | --- | --- |
+| `outline-ntt3.yml` | Stop inlining the fused three-layer NTT kernel ([notes](notes/outline-ntt3.md)) | Neutral, +0.004% latency |
+| `paired-ntt4.yml` | Paired NTT butterflies with bounded register liveness | 1.37% faster (0.6484 s against 0.6574 s) |
+| `recycle-experiment.yml` | Aligned buffer recycling in the prover | 4.95% slower |
+| `field-experiment.yml` | Deferred Karatsuba accumulation in GF(2^128) | Slower in a smaller local test, hosted run drew a CPU without AVX-512 |
 
-The experiment workflows need AVX-512 and VPCLMULQDQ, which only some GitHub-hosted machines have. A job that draws a machine without them fails at the first step with a CPU-feature error. Re-run it to draw another machine. Results are in each run's logs and are not official scores.
+Each result is one A-B-B-A block of three trials per round on a four-vCPU hosted VM, so read them as diagnostics. The official benchmark runs on a dedicated 16-vCPU, 32 GB Sapphire Rapids machine. `profile.yml` and `profile-wide.yml` record the unchanged worker's phase timings, `queue-sweep.yml` repeats that across NTT split depths, `diagnostic.yml` is a three-trial version of the baseline, and `native-kit.yml` packages the pinned source and Rust toolchain.
+
+The hosted pool mixes CPUs. The NTT and Karatsuba workflows need AVX-512 and VPCLMULQDQ and fail at their first step with a CPU-feature error when they draw a machine without them, so re-run to draw another.
 
 ## CI
 
-`ci.yml` runs on every push and pull request. It parses the workflows, compiles the helpers, and applies every experiment to the pinned upstream commit, so a drifted patch fails fast. The benchmark workflows themselves are manual and are not run by CI.
+`ci.yml` parses every workflow, byte-compiles the helpers and applies each experiment to the pinned upstream commit, so a drifted patch fails on the pull request. The benchmark workflows are manual only.
